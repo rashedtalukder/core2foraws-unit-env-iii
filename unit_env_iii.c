@@ -1,9 +1,42 @@
+/*!
+ * @brief Library for the ENV III (SHT30+QMP6988) unit by M5Stack used on the
+ * Core2 for AWS IoT Kit
+ * @copyright Copyright (c) 2023 by Rashed Talukder[https://rashedtalukder.com]
+ *  
+ * @license SPDX-License-Identifier: Apache 2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ * 
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ * 
+ * @todo Add support for QMP6988 pressure sensor
+ * 
+ * @Links [4-Relay](https://docs.m5stack.com/en/unit/4relay)
+ * @version  V0.0.1
+ * @date  2023-04-03
+ */
+
 #include <string.h>
 #include <esp_log.h>
 #include "unit_env_iii.h"
 #include "sht3x.h"
 
-#define REPEATABILITY_MODE SHT3X_HIGH
+#define REPEATABILITY_MODE              SHT3X_HIGH
+#define SHT3X_FETCH_DATA_CMD            0xE000
+#define SHT3X_MEAS_DURATION_REP_HIGH    15
+#define SHT3X_MEAS_DURATION_REP_MEDIUM  6
+#define SHT3X_MEAS_DURATION_REP_LOW     4
+
+#define G_POLYNOM 0x31
+
+#define CHECK(x) do { esp_err_t __; if ((__ = x) != ESP_OK) return __; } while (0)
 
 #define QMP6988_SLAVE_ADDRESS_L (0x70)
 #define QMP6988_SLAVE_ADDRESS_H (0x56)
@@ -117,26 +150,76 @@ typedef struct _qmp6988_data {
     qmp6988_ik_data_t ik;
 } qmp6988_data_t;
 
+static const uint16_t SHT3X_MEAS_DURATION_US[3];
+static inline uint16_t shuffle(uint16_t val);
+static uint8_t crc8(uint8_t data[], int len);
+static inline bool is_measuring(sht3x_t *dev);
 static esp_err_t _unit_enviii_qmp6988_get( float *pressure, float *temperature );
 static sht3x_t _dev;
 static const char *_TAG = "UNIT_ENV_III";
 
+// measurement durations in us
+static const uint16_t SHT3X_MEAS_DURATION_US[3] = {
+        SHT3X_MEAS_DURATION_REP_HIGH   * 1000,
+        SHT3X_MEAS_DURATION_REP_MEDIUM * 1000,
+        SHT3X_MEAS_DURATION_REP_LOW    * 1000
+};
+
+static inline uint16_t shuffle(uint16_t val)
+{
+    return (val >> 8) | (val << 8);
+}
+
+static uint8_t crc8(uint8_t data[], int len)
+{
+    // initialization value
+    uint8_t crc = 0xff;
+
+    // iterate over all bytes
+    for (int i = 0; i < len; i++)
+    {
+        crc ^= data[i];
+        for (int i = 0; i < 8; i++)
+        {
+            bool xor = crc & 0x80;
+            crc = crc << 1;
+            crc = xor ? crc ^ G_POLYNOM : crc;
+        }
+    }
+    return crc;
+}
+
+static inline bool is_measuring(sht3x_t *dev)
+{
+    // not running if measurement is not started at all or
+    // it is not the first measurement in periodic mode
+    if (!dev->meas_started || !dev->meas_first)
+      return false;
+
+    // not running if time elapsed is greater than duration
+    uint64_t elapsed = esp_timer_get_time() - dev->meas_start_time;
+
+    return elapsed < SHT3X_MEAS_DURATION_US[dev->repeatability];
+}
+
 esp_err_t unit_enviii_init( uint8_t *duration_to_wait )
 {
-    esp_err_t err = ESP_OK;
-
     memset( &_dev, 0, sizeof( sht3x_t ) );
 
-    err |= sht3x_init_desc( &_dev, COMMON_I2C_EXTERNAL, SHT3X_I2C_ADDR_GND, PORT_A_SDA_PIN, PORT_A_SCL_PIN );
-    ESP_LOGI( _TAG, "Init_DESC %d", err );
-    err |= sht3x_init( &_dev );
-    ESP_LOGI( _TAG, "Init %d", err);
-    err |= sht3x_start_measurement( &_dev, SHT3X_PERIODIC_1MPS, REPEATABILITY_MODE );
-    ESP_LOGI( _TAG, "Start measure %d", err);
-    unit_enviii_duration_get( duration_to_wait );
+    ESP_ERROR_CHECK( sht3x_init_desc( &_dev, SHT3X_I2C_ADDR_GND, COMMON_I2C_EXTERNAL, PORT_A_SDA_PIN, PORT_A_SCL_PIN ) );
+    ESP_LOGD( _TAG, "Setting SHT30 initial device descriptor success" );
+    ESP_ERROR_CHECK( sht3x_init( &_dev ) );
+    ESP_LOGD( _TAG, "Initializing SHT30 sensor success" );
 
+    return unit_enviii_duration_get( duration_to_wait );
+}
+
+esp_err_t unit_enviii_temp_humidity_measure( void )
+{
+    esp_err_t err = sht3x_start_measurement( &_dev, SHT3X_SINGLE_SHOT, REPEATABILITY_MODE );
+    ESP_LOGD( _TAG, "Start single measurement from SHT30 with high repeatability" );
+    
     return err;
-
 }
 
 esp_err_t unit_enviii_duration_get( uint8_t *duration )
@@ -150,7 +233,45 @@ esp_err_t unit_enviii_duration_get( uint8_t *duration )
 
 esp_err_t unit_enviii_temp_humidity_get( float *temperature, float *humidity )
 {
-    return sht3x_get_results( &_dev, temperature, humidity );
+    sht3x_raw_data_t raw_data;
+
+    if ( !_dev.meas_started )
+    {
+        ESP_LOGE( _TAG, "Measurement is not started" );
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (is_measuring(&_dev))
+    {
+        ESP_LOGE( _TAG, "Measurement is still running" );
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // read raw data
+    uint16_t cmd = shuffle( SHT3X_FETCH_DATA_CMD );
+    CHECK( i2c_dev_read( &( _dev.i2c_dev ), &cmd, 1, raw_data, sizeof( sht3x_raw_data_t ) ) );
+
+    // reset first measurement flag
+    _dev.meas_first = false;
+
+    // reset measurement started flag in single shot mode
+    if ( _dev.mode == SHT3X_SINGLE_SHOT )
+        _dev.meas_started = false;
+
+    // check temperature crc
+    if (crc8(raw_data, 2) != raw_data[ 2 ] )
+    {
+        ESP_LOGE( _TAG, "CRC check for temperature data failed" );
+        return ESP_ERR_INVALID_CRC;
+    }
+
+    // check humidity crc
+    if ( crc8(raw_data + 3, 2) != raw_data[ 5 ] )
+    {
+        ESP_LOGE( _TAG, "CRC check for humidity data failed" );
+        return ESP_ERR_INVALID_CRC;
+    }
+
+    return sht3x_compute_values( raw_data, temperature, humidity );
 }
 
 esp_err_t unit_enviii_pressure_get( float *pressure )
