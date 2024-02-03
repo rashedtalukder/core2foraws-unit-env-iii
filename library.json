@@ -2,7 +2,7 @@
     "name": "core2foraws-unit-env-iii",
     "version": "1.0.0",
     "description": "Peripheral driver for the M5Stack ENV-III unit on the Core2 for AWS IoT Kit",
-    "keywords": "env, humidity, temperature, m5stack, aws, core2, edukit",
+    "keywords": "sht30, qmp6988, env, humidity, temperature, m5stack, aws, core2, edukit",
     "repository":
     {
       "type": "git",
