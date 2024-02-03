@@ -18,10 +18,11 @@
  * 
  * @todo Add support for QMP6988 pressure sensor
  * 
- * @Links [4-Relay](https://docs.m5stack.com/en/unit/4relay)
+ * @Links [ENV III](https://docs.m5stack.com/en/unit/envIII)
  * @version  V0.0.1
  * @date  2023-04-03
  */
+
 #ifndef _UNIT_ENV_III_H_
 #define _UNIT_ENV_III_H_
 
