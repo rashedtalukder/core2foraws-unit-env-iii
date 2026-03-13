@@ -1,0 +1,20 @@
+menu "Unit ENV-III Configuration"
+
+    config UNIT_ENV_III_USE_PAHUB
+        bool "Use PA Hub for I2C communication"
+        default false
+        help
+            Enable this option to use PA Hub for I2C communication with Unit ENV-III.
+            When enabled, the sensor will communicate through the specified PA Hub channel
+            instead of direct I2C connection.
+
+    config UNIT_ENV_III_PAHUB_CHANNEL
+        int "PA Hub channel number"
+        depends on UNIT_ENV_III_USE_PAHUB
+        range 0 5
+        default 0
+        help
+            Specify the PA Hub channel (0-5) to use for Unit ENV-III communication.
+            This setting is only used when PA Hub is enabled.
+
+endmenu

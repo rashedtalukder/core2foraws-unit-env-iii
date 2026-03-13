@@ -1,310 +1,823 @@
-/*!
- * @brief Library for the ENV III (SHT30+QMP6988) unit by M5Stack used on the
- * Core2 for AWS IoT Kit
- * @copyright Copyright (c) 2023 by Rashed Talukder[https://rashedtalukder.com]
- *
- * @license SPDX-License-Identifier: Apache 2.0
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- * @todo Add support for QMP6988 pressure sensor
- *
- * @Links [ENV III](https://docs.m5stack.com/en/unit/envIII)
- * @version  V0.0.1
- * @date  2023-04-03
- */
-
 #include "unit_env_iii.h"
-#include "sht3x.h"
-#include <esp_log.h>
-#include <string.h>
+#include "core2foraws_expports.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <math.h>
 
-#define REPEATABILITY_MODE             SHT3X_HIGH
-#define SHT3X_FETCH_DATA_CMD           0xE000
-#define SHT3X_MEAS_DURATION_REP_HIGH   15
-#define SHT3X_MEAS_DURATION_REP_MEDIUM 6
-#define SHT3X_MEAS_DURATION_REP_LOW    4
+#ifdef CONFIG_UNIT_ENV_III_USE_PAHUB
+#include "unit_pahub.h"
+#endif
 
-#define G_POLYNOM 0x31
+static const char *_TAG = "unit_env_iii";
 
-#define CHECK( x )                                                             \
-  do                                                                           \
-  {                                                                            \
-    esp_err_t __;                                                              \
-    if( ( __ = x ) != ESP_OK )                                                 \
-      return __;                                                               \
-  } while( 0 )
+// SHT30 Commands
+#define _SHT30_CMD_MEASURE_HIGH_REP 0x2400
+#define _SHT30_CMD_MEASURE_MED_REP  0x240B
+#define _SHT30_CMD_MEASURE_LOW_REP  0x2416
+#define _SHT30_CMD_HEATER_ENABLE    0x306D
+#define _SHT30_CMD_HEATER_DISABLE   0x3066
+#define _SHT30_CMD_SOFT_RESET       0x30A2
+#define _SHT30_CMD_READ_STATUS      0xF32D
 
-#define QMP6988_SLAVE_ADDRESS_L ( 0x70 )
-#define QMP6988_SLAVE_ADDRESS_H ( 0x56 )
+// QMP6988 Registers
+#define _QMP6988_CHIP_ID_REG     0xD1
+#define _QMP6988_RESET_REG       0xE0
+#define _QMP6988_IIR_REG         0xF1
+#define _QMP6988_DEVICE_STAT_REG 0xF3
+#define _QMP6988_CTRL_MEAS_REG   0xF4
+#define _QMP6988_IO_SETUP_REG    0xF5
+#define _QMP6988_PRESS_MSB_REG   0xF7
+#define _QMP6988_TEMP_MSB_REG    0xFA
 
-#define QMP6988_U16_t unsigned short
-#define QMP6988_S16_t short
-#define QMP6988_U32_t unsigned int
-#define QMP6988_S32_t int
-#define QMP6988_U64_t unsigned long long
-#define QMP6988_S64_t long long
+// QMP6988 Constants
+#define _QMP6988_CHIP_ID   0x5C
+#define _QMP6988_RESET_CMD 0xE6
 
-#define QMP6988_CHIP_ID 0x5C
+// Calibration registers
+#define _QMP6988_CALIB_DATA_START 0xA0
+#define _QMP6988_CALIB_DATA_LEN   25
 
-#define QMP6988_CHIP_ID_REG     0xD1
-#define QMP6988_RESET_REG       0xE0 /* Device reset register */
-#define QMP6988_DEVICE_STAT_REG 0xF3 /* Device state register */
-#define QMP6988_CTRLMEAS_REG    0xF4 /* Measurement Condition Control Register */
-/* data */
-#define QMP6988_PRESSURE_MSB_REG    0xF7 /* Pressure MSB Register */
-#define QMP6988_TEMPERATURE_MSB_REG 0xFA /* Temperature MSB Reg */
+// Static variables
+static bool _initialized = false;
+static unit_env_iii_config_t _config;
+static i2c_master_dev_handle_t _sht30_dev = NULL;
+static i2c_master_dev_handle_t _qmp6988_dev = NULL;
 
-/* compensation calculation */
-#define QMP6988_CALIBRATION_DATA_START                                         \
-  0xA0 /* QMP6988 compensation coefficients */
-#define QMP6988_CALIBRATION_DATA_LENGTH 25
-
-#define SHIFT_RIGHT_4_POSITION 4
-#define SHIFT_LEFT_2_POSITION  2
-#define SHIFT_LEFT_4_POSITION  4
-#define SHIFT_LEFT_5_POSITION  5
-#define SHIFT_LEFT_8_POSITION  8
-#define SHIFT_LEFT_12_POSITION 12
-#define SHIFT_LEFT_16_POSITION 16
-
-/* power mode */
-#define QMP6988_SLEEP_MODE  0x00
-#define QMP6988_FORCED_MODE 0x01
-#define QMP6988_NORMAL_MODE 0x03
-
-#define QMP6988_CTRLMEAS_REG_MODE__POS 0
-#define QMP6988_CTRLMEAS_REG_MODE__MSK 0x03
-#define QMP6988_CTRLMEAS_REG_MODE__LEN 2
-
-/* oversampling */
-#define QMP6988_OVERSAMPLING_SKIPPED 0x00
-#define QMP6988_OVERSAMPLING_1X      0x01
-#define QMP6988_OVERSAMPLING_2X      0x02
-#define QMP6988_OVERSAMPLING_4X      0x03
-#define QMP6988_OVERSAMPLING_8X      0x04
-#define QMP6988_OVERSAMPLING_16X     0x05
-#define QMP6988_OVERSAMPLING_32X     0x06
-#define QMP6988_OVERSAMPLING_64X     0x07
-
-#define QMP6988_CTRLMEAS_REG_OSRST__POS 5
-#define QMP6988_CTRLMEAS_REG_OSRST__MSK 0xE0
-#define QMP6988_CTRLMEAS_REG_OSRST__LEN 3
-
-#define QMP6988_CTRLMEAS_REG_OSRSP__POS 2
-#define QMP6988_CTRLMEAS_REG_OSRSP__MSK 0x1C
-#define QMP6988_CTRLMEAS_REG_OSRSP__LEN 3
-
-/* filter */
-#define QMP6988_FILTERCOEFF_OFF 0x00
-#define QMP6988_FILTERCOEFF_2   0x01
-#define QMP6988_FILTERCOEFF_4   0x02
-#define QMP6988_FILTERCOEFF_8   0x03
-#define QMP6988_FILTERCOEFF_16  0x04
-#define QMP6988_FILTERCOEFF_32  0x05
-
-#define QMP6988_CONFIG_REG             0xF1 /*IIR filter co-efficient setting Register*/
-#define QMP6988_CONFIG_REG_FILTER__POS 0
-#define QMP6988_CONFIG_REG_FILTER__MSK 0x07
-#define QMP6988_CONFIG_REG_FILTER__LEN 3
-
-#define SUBTRACTOR 8388608
-
-typedef struct _qmp6988_cali_data
+// QMP6988 calibration coefficients
+static struct
 {
-  QMP6988_S32_t COE_a0;
-  QMP6988_S16_t COE_a1;
-  QMP6988_S16_t COE_a2;
-  QMP6988_S32_t COE_b00;
-  QMP6988_S16_t COE_bt1;
-  QMP6988_S16_t COE_bt2;
-  QMP6988_S16_t COE_bp1;
-  QMP6988_S16_t COE_b11;
-  QMP6988_S16_t COE_bp2;
-  QMP6988_S16_t COE_b12;
-  QMP6988_S16_t COE_b21;
-  QMP6988_S16_t COE_bp3;
-} qmp6988_cali_data_t;
+  float COE_a0, COE_a1, COE_a2;
+  float COE_b00, COE_bt1, COE_bt2, COE_bp1, COE_b11, COE_bp2, COE_b12, COE_b21,
+      COE_bp3;
+} _qmp6988_calib;
 
-typedef struct _qmp6988_fk_data
+// Static function declarations
+static esp_err_t _write_i2c( i2c_master_dev_handle_t dev, const uint8_t *data, size_t len );
+static esp_err_t _read_i2c( i2c_master_dev_handle_t dev, uint8_t *data, size_t len );
+static esp_err_t _write_read_i2c( i2c_master_dev_handle_t dev, const uint8_t *write_data,
+                                  size_t write_len, uint8_t *read_data,
+                                  size_t read_len );
+static uint8_t _crc8( const uint8_t *data, int len );
+static esp_err_t _sht30_init( void );
+static esp_err_t _qmp6988_init( void );
+static esp_err_t _qmp6988_read_calibration( void );
+static float _qmp6988_compensate_temperature( int32_t raw_temp );
+static float _qmp6988_compensate_pressure( int32_t raw_press, float comp_temp );
+
+// I2C communication functions
+static esp_err_t _write_i2c( i2c_master_dev_handle_t dev, const uint8_t *data, size_t len )
 {
-  float a0, b00;
-  float a1, a2, bt1, bt2, bp1, b11, bp2, b12, b21, bp3;
-} qmp6988_fk_data_t;
-
-typedef struct _qmp6988_ik_data
-{
-  QMP6988_S32_t a0, b00;
-  QMP6988_S32_t a1, a2;
-  QMP6988_S64_t bt1, bt2, bp1, b11, bp2, b12, b21, bp3;
-} qmp6988_ik_data_t;
-
-typedef struct _qmp6988_data
-{
-  uint8_t slave;
-  uint8_t chip_id;
-  uint8_t power_mode;
-  float temperature;
-  float pressure;
-  float altitude;
-  qmp6988_cali_data_t qmp6988_cali;
-  qmp6988_ik_data_t ik;
-} qmp6988_data_t;
-
-static const uint16_t SHT3X_MEAS_DURATION_US[ 3 ];
-static inline uint16_t shuffle( uint16_t val );
-static uint8_t crc8( uint8_t data[], int len );
-static inline bool is_measuring( sht3x_t *dev );
-static esp_err_t _unit_enviii_qmp6988_get( float *pressure,
-                                           float *temperature );
-static sht3x_t _dev;
-static const char *_TAG = "UNIT_ENV_III";
-
-// measurement durations in us
-static const uint16_t SHT3X_MEAS_DURATION_US[ 3 ] = {
-    SHT3X_MEAS_DURATION_REP_HIGH * 1000, SHT3X_MEAS_DURATION_REP_MEDIUM * 1000,
-    SHT3X_MEAS_DURATION_REP_LOW * 1000 };
-
-static inline uint16_t shuffle( uint16_t val )
-{
-  return ( val >> 8 ) | ( val << 8 );
+#ifdef CONFIG_UNIT_ENV_III_USE_PAHUB
+  if( len > 1 )
+  {
+    return unit_pahub_i2c_write( CONFIG_UNIT_ENV_III_PAHUB_CHANNEL, dev,
+                                 data[ 0 ], &data[ 1 ], len - 1 );
+  }
+  else if( len == 1 )
+  {
+    // For single byte writes (like writing just a register address)
+    return unit_pahub_i2c_write( CONFIG_UNIT_ENV_III_PAHUB_CHANNEL, dev,
+                                 CORE2FORAWS_I2C_NO_REG, data, 1 );
+  }
+  return ESP_ERR_INVALID_ARG;
+#else
+  if( len > 1 )
+  {
+    return core2foraws_expports_i2c_write( dev, data[ 0 ], &data[ 1 ],
+                                           len - 1 );
+  }
+  else if( len == 1 )
+  {
+    // For single byte writes, use CORE2FORAWS_I2C_NO_REG
+    return core2foraws_expports_i2c_write( dev, CORE2FORAWS_I2C_NO_REG, data, 1 );
+  }
+  return ESP_ERR_INVALID_ARG;
+#endif
 }
 
-static uint8_t crc8( uint8_t data[], int len )
+static esp_err_t _read_i2c( i2c_master_dev_handle_t dev, uint8_t *data, size_t len )
 {
-  // initialization value
-  uint8_t crc = 0xff;
+#ifdef CONFIG_UNIT_ENV_III_USE_PAHUB
+  // For raw reads without register address, use CORE2FORAWS_I2C_NO_REG
+  return unit_pahub_i2c_read( CONFIG_UNIT_ENV_III_PAHUB_CHANNEL, dev,
+                              CORE2FORAWS_I2C_NO_REG, data, len );
+#else
+  return core2foraws_expports_i2c_read( dev, CORE2FORAWS_I2C_NO_REG, data, len );
+#endif
+  return ESP_FAIL;  /* unreachable — silences -Wreturn-type */
+}
 
-  // iterate over all bytes
+static esp_err_t _write_read_i2c( i2c_master_dev_handle_t dev, const uint8_t *write_data,
+                                  size_t write_len, uint8_t *read_data,
+                                  size_t read_len )
+{
+#ifdef CONFIG_UNIT_ENV_III_USE_PAHUB
+  // For register reads, use the unit_pahub_i2c_read with the register address
+  if( write_len == 1 )
+  {
+    // Simple register read
+    return unit_pahub_i2c_read( CONFIG_UNIT_ENV_III_PAHUB_CHANNEL, dev,
+                                write_data[ 0 ], read_data, read_len );
+  }
+  else if( write_len > 1 )
+  {
+    // Write command/data first
+    esp_err_t ret = unit_pahub_i2c_write( CONFIG_UNIT_ENV_III_PAHUB_CHANNEL,
+                                          dev, write_data[ 0 ],
+                                          &write_data[ 1 ], write_len - 1 );
+    if( ret != ESP_OK )
+      return ret;
+
+    vTaskDelay( pdMS_TO_TICKS( 10 ) );
+
+    // Then read the response
+    return unit_pahub_i2c_read( CONFIG_UNIT_ENV_III_PAHUB_CHANNEL, dev,
+                                CORE2FORAWS_I2C_NO_REG, read_data, read_len );
+  }
+  return ESP_ERR_INVALID_ARG;
+#else
+  if( write_len == 1 )
+  {
+    // Simple register read
+    return core2foraws_expports_i2c_read( dev, write_data[ 0 ], read_data,
+                                          read_len );
+  }
+  else if( write_len > 1 )
+  {
+    // Write additional data first
+    esp_err_t ret = core2foraws_expports_i2c_write(
+        dev, write_data[ 0 ], &write_data[ 1 ], write_len - 1 );
+    if( ret != ESP_OK )
+      return ret;
+
+    vTaskDelay( pdMS_TO_TICKS( 10 ) );
+
+    // Then read
+    return core2foraws_expports_i2c_read( dev, CORE2FORAWS_I2C_NO_REG, read_data,
+                                          read_len );
+  }
+  return ESP_ERR_INVALID_ARG;
+#endif
+}
+
+// CRC8 calculation for SHT30
+static uint8_t _crc8( const uint8_t *data, int len )
+{
+  const uint8_t polynomial = 0x31;
+  uint8_t crc = 0xFF;
+
   for( int i = 0; i < len; i++ )
   {
     crc ^= data[ i ];
-    for( int i = 0; i < 8; i++ )
+    for( int j = 0; j < 8; j++ )
     {
-      bool xor = crc & 0x80;
-      crc = crc << 1;
-      crc = xor ? crc ^ G_POLYNOM : crc;
+      if( crc & 0x80 )
+      {
+        crc = ( crc << 1 ) ^ polynomial;
+      }
+      else
+      {
+        crc <<= 1;
+      }
     }
   }
   return crc;
 }
 
-static inline bool is_measuring( sht3x_t *dev )
+// SHT30 initialization
+static esp_err_t _sht30_init( void )
 {
-  // not running if measurement is not started at all or
-  // it is not the first measurement in periodic mode
-  if( !dev->meas_started || !dev->meas_first )
-    return false;
-
-  // not running if time elapsed is greater than duration
-  uint64_t elapsed = esp_timer_get_time() - dev->meas_start_time;
-
-  return elapsed < SHT3X_MEAS_DURATION_US[ dev->repeatability ];
-}
-
-esp_err_t unit_enviii_init( uint8_t *duration_to_wait )
-{
-  memset( &_dev, 0, sizeof( sht3x_t ) );
-
-  ESP_ERROR_CHECK( sht3x_init_desc( &_dev, SHT3X_I2C_ADDR_GND,
-                                    COMMON_I2C_EXTERNAL, PORT_A_SDA_PIN,
-                                    PORT_A_SCL_PIN ) );
-  ESP_LOGD( _TAG, "Setting SHT30 initial device descriptor success" );
-  ESP_ERROR_CHECK( sht3x_init( &_dev ) );
-  ESP_LOGD( _TAG, "Initializing SHT30 sensor success" );
-
-  return unit_enviii_duration_get( duration_to_wait );
-}
-
-esp_err_t unit_enviii_temp_humidity_measure( void )
-{
-  esp_err_t err =
-      sht3x_start_measurement( &_dev, SHT3X_SINGLE_SHOT, REPEATABILITY_MODE );
-  ESP_LOGD( _TAG,
-            "Start single measurement from SHT30 with high repeatability" );
-
-  return err;
-}
-
-esp_err_t unit_enviii_duration_get( uint8_t *duration )
-{
-  esp_err_t ret = ESP_OK;
-
-  *duration = sht3x_get_measurement_duration( REPEATABILITY_MODE );
-
-  return ret;
-}
-
-esp_err_t unit_enviii_temp_humidity_get( float *temperature, float *humidity )
-{
-  sht3x_raw_data_t raw_data;
-
-  if( !_dev.meas_started )
+  // Send soft reset
+  uint8_t reset_cmd[ 2 ] = { ( _SHT30_CMD_SOFT_RESET >> 8 ) & 0xFF,
+                             _SHT30_CMD_SOFT_RESET & 0xFF };
+  esp_err_t ret = _write_i2c( _sht30_dev, reset_cmd, 2 );
+  if( ret != ESP_OK )
   {
-    ESP_LOGE( _TAG, "Measurement is not started" );
-    return ESP_ERR_INVALID_STATE;
-  }
-  if( is_measuring( &_dev ) )
-  {
-    ESP_LOGE( _TAG, "Measurement is still running" );
-    return ESP_ERR_INVALID_STATE;
+    ESP_LOGE( _TAG, "SHT30 reset failed: %s", esp_err_to_name( ret ) );
+    return ret;
   }
 
-  // read raw data
-  uint16_t cmd = shuffle( SHT3X_FETCH_DATA_CMD );
-  CHECK( i2c_dev_read( &( _dev.i2c_dev ), &cmd, 1, raw_data,
-                       sizeof( sht3x_raw_data_t ) ) );
+  vTaskDelay( pdMS_TO_TICKS( 10 ) ); // Wait for reset
 
-  // reset first measurement flag
-  _dev.meas_first = false;
-
-  // reset measurement started flag in single shot mode
-  if( _dev.mode == SHT3X_SINGLE_SHOT )
-    _dev.meas_started = false;
-
-  // check temperature crc
-  if( crc8( raw_data, 2 ) != raw_data[ 2 ] )
+  // Set heater state
+  uint16_t heater_cmd = _config.sht30_heater_enable ? _SHT30_CMD_HEATER_ENABLE
+                                                    : _SHT30_CMD_HEATER_DISABLE;
+  uint8_t cmd[ 2 ] = { ( heater_cmd >> 8 ) & 0xFF, heater_cmd & 0xFF };
+  ret = _write_i2c( _sht30_dev, cmd, 2 );
+  if( ret != ESP_OK )
   {
-    ESP_LOGE( _TAG, "CRC check for temperature data failed" );
+    ESP_LOGE( _TAG, "SHT30 heater config failed: %s", esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  ESP_LOGI( _TAG, "SHT30 initialized successfully" );
+  return ESP_OK;
+}
+
+// QMP6988 initialization
+static esp_err_t _qmp6988_init( void )
+{
+  // Check chip ID
+  uint8_t chip_id_reg = _QMP6988_CHIP_ID_REG;
+  uint8_t chip_id = 0;
+  esp_err_t ret = _write_read_i2c( _qmp6988_dev, &chip_id_reg, 1,
+                                   &chip_id, 1 );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "QMP6988 chip ID read failed: %s", esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  ESP_LOGI( _TAG, "QMP6988 chip ID: 0x%02X (expected: 0x%02X)", chip_id,
+            _QMP6988_CHIP_ID );
+
+  if( chip_id != _QMP6988_CHIP_ID )
+  {
+    ESP_LOGE( _TAG, "QMP6988 chip ID mismatch: expected 0x%02X, got 0x%02X",
+              _QMP6988_CHIP_ID, chip_id );
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  // Soft reset
+  uint8_t reset_data[ 2 ] = { _QMP6988_RESET_REG, _QMP6988_RESET_CMD };
+  ret = _write_i2c( _qmp6988_dev, reset_data, 2 );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "QMP6988 reset failed: %s", esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  vTaskDelay( pdMS_TO_TICKS( 10 ) ); // Wait for reset
+
+  // Wait for OTP data to be ready (datasheet: otp_update must be 0)
+  uint8_t stat_reg = _QMP6988_DEVICE_STAT_REG;
+  uint8_t stat_val = 0;
+  for( int i = 0; i < 10; i++ )
+  {
+    ret = _write_read_i2c( _qmp6988_dev, &stat_reg, 1, &stat_val,
+                           1 );
+    if( ret != ESP_OK )
+    {
+      ESP_LOGE( _TAG, "QMP6988 status read failed: %s",
+                esp_err_to_name( ret ) );
+      return ret;
+    }
+    if( !( stat_val & 0x01 ) )
+    {
+      break; // OTP update complete
+    }
+    vTaskDelay( pdMS_TO_TICKS( 5 ) );
+  }
+
+  // Read calibration data
+  ret = _qmp6988_read_calibration();
+  if( ret != ESP_OK )
+  {
+    return ret;
+  }
+
+  // Configure IIR filter (register 0xF1, bits [2:0])
+  uint8_t iir_data[ 2 ] = { _QMP6988_IIR_REG, _config.qmp6988_filter };
+  ret = _write_i2c( _qmp6988_dev, iir_data, 2 );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "QMP6988 IIR filter config failed: %s",
+              esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  // Configure oversampling and enter normal mode (continuous measurements)
+  uint8_t ctrl_meas =
+      ( ( _config.qmp6988_temp_osr << 5 ) | ( _config.qmp6988_press_osr << 2 ) |
+        0x03 ); // Normal mode
+  uint8_t ctrl_data[ 2 ] = { _QMP6988_CTRL_MEAS_REG, ctrl_meas };
+  ret = _write_i2c( _qmp6988_dev, ctrl_data, 2 );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "QMP6988 ctrl_meas config failed: %s",
+              esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  ESP_LOGI( _TAG, "QMP6988 initialized successfully" );
+  return ESP_OK;
+}
+
+// QMP6988 calibration data reading
+static esp_err_t _qmp6988_read_calibration( void )
+{
+  uint8_t calib_reg = _QMP6988_CALIB_DATA_START;
+  uint8_t calib_data[ _QMP6988_CALIB_DATA_LEN ];
+
+  esp_err_t ret = _write_read_i2c( _qmp6988_dev, &calib_reg, 1,
+                                   calib_data, _QMP6988_CALIB_DATA_LEN );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "QMP6988 calibration read failed: %s",
+              esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  // Parse calibration coefficients per QMP6988 datasheet register map.
+  // Reading starts at 0xA0 and auto-increments through 0xB8 (25 bytes).
+  //
+  // Register-to-array mapping:
+  //   [0:1]   = 0xA0:0xA1 = b00 (upper 16 of 20 bits)
+  //   [2:3]   = 0xA2:0xA3 = bt1
+  //   [4:5]   = 0xA4:0xA5 = bt2
+  //   [6:7]   = 0xA6:0xA7 = bp1
+  //   [8:9]   = 0xA8:0xA9 = b11
+  //   [10:11] = 0xAA:0xAB = bp2
+  //   [12:13] = 0xAC:0xAD = b12
+  //   [14:15] = 0xAE:0xAF = b21
+  //   [16:17] = 0xB0:0xB1 = bp3
+  //   [18:19] = 0xB2:0xB3 = a0 (upper 16 of 20 bits)
+  //   [20:21] = 0xB4:0xB5 = a1
+  //   [22:23] = 0xB6:0xB7 = a2
+  //   [24]    = 0xB8       = b00[3:0] (upper nibble) | a0[3:0] (lower nibble)
+  //
+  // 16-bit coefficients use: K = A + S * OTP / 32767.0
+  // 20-bit coefficients (a0, b00) use: K = OTP / 16.0
+
+  // b00 (20-bit: data[0:1] + upper nibble of data[24])
+  uint32_t COE_b00_otp = ( (uint32_t)calib_data[ 0 ] << 12 ) |
+                         ( (uint32_t)calib_data[ 1 ] << 4 ) |
+                         ( ( calib_data[ 24 ] & 0xF0 ) >> 4 );
+  if( COE_b00_otp & 0x80000 )
+    COE_b00_otp -= 0x100000; // Sign extend 20-bit
+  _qmp6988_calib.COE_b00 = (float)( (int32_t)COE_b00_otp ) / 16.0f;
+
+  // bt1 (data[2:3])
+  int16_t COE_bt1_otp = (int16_t)( ( calib_data[ 2 ] << 8 ) | calib_data[ 3 ] );
+  _qmp6988_calib.COE_bt1 = 1.00e-01f + ( 9.10e-02f * COE_bt1_otp ) / 32767.0f;
+
+  // bt2 (data[4:5])
+  int16_t COE_bt2_otp = (int16_t)( ( calib_data[ 4 ] << 8 ) | calib_data[ 5 ] );
+  _qmp6988_calib.COE_bt2 = 1.20e-08f + ( 1.20e-06f * COE_bt2_otp ) / 32767.0f;
+
+  // bp1 (data[6:7])
+  int16_t COE_bp1_otp = (int16_t)( ( calib_data[ 6 ] << 8 ) | calib_data[ 7 ] );
+  _qmp6988_calib.COE_bp1 = 3.30e-02f + ( 1.90e-02f * COE_bp1_otp ) / 32767.0f;
+
+  // b11 (data[8:9])
+  int16_t COE_b11_otp = (int16_t)( ( calib_data[ 8 ] << 8 ) | calib_data[ 9 ] );
+  _qmp6988_calib.COE_b11 = 2.10e-07f + ( 1.40e-07f * COE_b11_otp ) / 32767.0f;
+
+  // bp2 (data[10:11])
+  int16_t COE_bp2_otp =
+      (int16_t)( ( calib_data[ 10 ] << 8 ) | calib_data[ 11 ] );
+  _qmp6988_calib.COE_bp2 = -6.30e-10f + ( 3.50e-10f * COE_bp2_otp ) / 32767.0f;
+
+  // b12 (data[12:13])
+  int16_t COE_b12_otp =
+      (int16_t)( ( calib_data[ 12 ] << 8 ) | calib_data[ 13 ] );
+  _qmp6988_calib.COE_b12 = 2.90e-13f + ( 7.60e-13f * COE_b12_otp ) / 32767.0f;
+
+  // b21 (data[14:15])
+  int16_t COE_b21_otp =
+      (int16_t)( ( calib_data[ 14 ] << 8 ) | calib_data[ 15 ] );
+  _qmp6988_calib.COE_b21 = 2.10e-15f + ( 1.20e-14f * COE_b21_otp ) / 32767.0f;
+
+  // bp3 (data[16:17])
+  int16_t COE_bp3_otp =
+      (int16_t)( ( calib_data[ 16 ] << 8 ) | calib_data[ 17 ] );
+  _qmp6988_calib.COE_bp3 = 1.30e-16f + ( 7.90e-17f * COE_bp3_otp ) / 32767.0f;
+
+  // a0 (20-bit: data[18:19] + lower nibble of data[24])
+  uint32_t COE_a0_otp = ( (uint32_t)calib_data[ 18 ] << 12 ) |
+                        ( (uint32_t)calib_data[ 19 ] << 4 ) |
+                        ( calib_data[ 24 ] & 0x0F );
+  if( COE_a0_otp & 0x80000 )
+    COE_a0_otp -= 0x100000; // Sign extend 20-bit
+  _qmp6988_calib.COE_a0 = (float)( (int32_t)COE_a0_otp ) / 16.0f;
+
+  // a1 (data[20:21])
+  int16_t COE_a1_otp =
+      (int16_t)( ( calib_data[ 20 ] << 8 ) | calib_data[ 21 ] );
+  _qmp6988_calib.COE_a1 = -6.30e-03f + ( 4.30e-04f * COE_a1_otp ) / 32767.0f;
+
+  // a2 (data[22:23])
+  int16_t COE_a2_otp =
+      (int16_t)( ( calib_data[ 22 ] << 8 ) | calib_data[ 23 ] );
+  _qmp6988_calib.COE_a2 = -1.90e-11f + ( 1.20e-10f * COE_a2_otp ) / 32767.0f;
+
+  ESP_LOGI( _TAG, "QMP6988 calibration coefficients:" );
+  ESP_LOGI( _TAG, "a0=%.2f, a1=%.6f, a2=%.2e", _qmp6988_calib.COE_a0,
+            _qmp6988_calib.COE_a1, _qmp6988_calib.COE_a2 );
+  ESP_LOGI( _TAG, "b00=%.2f, bt1=%.6f, bt2=%.2e", _qmp6988_calib.COE_b00,
+            _qmp6988_calib.COE_bt1, _qmp6988_calib.COE_bt2 );
+  ESP_LOGI( _TAG, "bp1=%.6f, b11=%.2e, bp2=%.2e", _qmp6988_calib.COE_bp1,
+            _qmp6988_calib.COE_b11, _qmp6988_calib.COE_bp2 );
+  ESP_LOGI( _TAG, "b12=%.2e, b21=%.2e, bp3=%.2e", _qmp6988_calib.COE_b12,
+            _qmp6988_calib.COE_b21, _qmp6988_calib.COE_bp3 );
+
+  return ESP_OK;
+}
+
+// Temperature compensation for QMP6988
+static float _qmp6988_compensate_temperature( int32_t raw_temp )
+{
+  // Apply datasheet formula: Dt = raw_temp - 2^23 for signed conversion
+  float Dt = (float)( raw_temp - ( 1 << 23 ) );
+
+  // Apply temperature compensation formula: Tr = a0 + a1*Dt + a2*Dt^2
+  float Tr = _qmp6988_calib.COE_a0 + _qmp6988_calib.COE_a1 * Dt +
+             _qmp6988_calib.COE_a2 * Dt * Dt;
+
+  // Tr is already in the correct format (256*degC), return as is for pressure
+  // calc
+  return Tr;
+}
+
+// Pressure compensation for QMP6988
+static float _qmp6988_compensate_pressure( int32_t raw_press, float Tr )
+{
+  // Apply datasheet formula: Dp = raw_press - 2^23 for signed conversion
+  float Dp = (float)( raw_press - ( 1 << 23 ) );
+
+  // Apply pressure compensation formula exactly as specified in datasheet
+  float Pr = _qmp6988_calib.COE_b00 + _qmp6988_calib.COE_bt1 * Tr +
+             _qmp6988_calib.COE_bp1 * Dp + _qmp6988_calib.COE_b11 * Tr * Dp +
+             _qmp6988_calib.COE_bt2 * Tr * Tr +
+             _qmp6988_calib.COE_bp2 * Dp * Dp +
+             _qmp6988_calib.COE_b12 * Dp * Tr * Tr +
+             _qmp6988_calib.COE_b21 * Dp * Dp * Tr +
+             _qmp6988_calib.COE_bp3 * Dp * Dp * Dp;
+
+  return Pr; // Result is in Pascal
+}
+
+// Public API implementation
+esp_err_t unit_env_iii_get_default_config( unit_env_iii_config_t *config )
+{
+  if( config == NULL )
+  {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  config->sht30_repeatability = UNIT_ENV_III_SHT30_REPEATABILITY_HIGH;
+  config->sht30_heater_enable = false;
+  config->qmp6988_temp_osr = UNIT_ENV_III_QMP6988_OSR_16;
+  config->qmp6988_press_osr = UNIT_ENV_III_QMP6988_OSR_16;
+  config->qmp6988_filter = UNIT_ENV_III_QMP6988_FILTER_16;
+
+  return ESP_OK;
+}
+
+esp_err_t unit_env_iii_init( void )
+{
+  unit_env_iii_config_t default_config;
+  unit_env_iii_get_default_config( &default_config );
+  return unit_env_iii_init_with_config( &default_config );
+}
+
+esp_err_t unit_env_iii_init_with_config( const unit_env_iii_config_t *config )
+{
+  if( config == NULL )
+  {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if( _initialized )
+  {
+    ESP_LOGW( _TAG, "Already initialized" );
+    return ESP_OK;
+  }
+
+  _config = *config;
+  esp_err_t ret = ESP_FAIL;
+
+#ifdef CONFIG_UNIT_ENV_III_USE_PAHUB
+  ret = unit_pahub_init();
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "PA Hub initialization failed: %s",
+              esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  ret = unit_pahub_channel_set( CONFIG_UNIT_ENV_III_PAHUB_CHANNEL );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "PA Hub channel set failed: %s", esp_err_to_name( ret ) );
+    return ret;
+  }
+#endif
+
+  ret = core2foraws_expports_i2c_device_add( UNIT_ENV_III_SHT30_ADDR, 100000, &_sht30_dev );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "Failed to add SHT30 I2C device: %s", esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  ret = core2foraws_expports_i2c_device_add( UNIT_ENV_III_QMP6988_ADDR, 100000, &_qmp6988_dev );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "Failed to add QMP6988 I2C device: %s", esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  // Initialize SHT30
+  ret = _sht30_init();
+  if( ret != ESP_OK )
+  {
+    return ret;
+  }
+
+  // Initialize QMP6988
+  ret = _qmp6988_init();
+  if( ret != ESP_OK )
+  {
+    return ret;
+  }
+
+  _initialized = true;
+  ESP_LOGI( _TAG, "Unit ENV-III initialized successfully" );
+  return ESP_OK;
+}
+
+esp_err_t unit_env_iii_deinit( void )
+{
+  if( !_initialized )
+  {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  _initialized = false;
+  ESP_LOGI( _TAG, "Unit ENV-III deinitialized" );
+  return ESP_OK;
+}
+
+esp_err_t unit_env_iii_read_temp_humidity( float *temperature_c,
+                                           float *humidity_rh )
+{
+  if( !_initialized )
+  {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  // Select measurement command based on repeatability
+  uint16_t measure_cmd;
+  switch( _config.sht30_repeatability )
+  {
+  case UNIT_ENV_III_SHT30_REPEATABILITY_HIGH:
+    measure_cmd = _SHT30_CMD_MEASURE_HIGH_REP;
+    break;
+  case UNIT_ENV_III_SHT30_REPEATABILITY_MEDIUM:
+    measure_cmd = _SHT30_CMD_MEASURE_MED_REP;
+    break;
+  case UNIT_ENV_III_SHT30_REPEATABILITY_LOW:
+    measure_cmd = _SHT30_CMD_MEASURE_LOW_REP;
+    break;
+  default:
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  // Send measurement command
+  uint8_t cmd[ 2 ] = { ( measure_cmd >> 8 ) & 0xFF, measure_cmd & 0xFF };
+  esp_err_t ret = _write_i2c( _sht30_dev, cmd, 2 );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "SHT30 measurement command failed: %s",
+              esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  // Wait for measurement
+  vTaskDelay( pdMS_TO_TICKS( 20 ) );
+
+  // Read measurement data
+  uint8_t data[ 6 ];
+  ret = _read_i2c( _sht30_dev, data, 6 );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "SHT30 data read failed: %s", esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  // Verify CRC
+  if( _crc8( &data[ 0 ], 2 ) != data[ 2 ] ||
+      _crc8( &data[ 3 ], 2 ) != data[ 5 ] )
+  {
+    ESP_LOGE( _TAG, "SHT30 CRC check failed" );
     return ESP_ERR_INVALID_CRC;
   }
 
-  // check humidity crc
-  if( crc8( raw_data + 3, 2 ) != raw_data[ 5 ] )
+  // Convert raw data
+  uint16_t raw_temp = ( data[ 0 ] << 8 ) | data[ 1 ];
+  uint16_t raw_hum = ( data[ 3 ] << 8 ) | data[ 4 ];
+
+  if( temperature_c != NULL )
   {
-    ESP_LOGE( _TAG, "CRC check for humidity data failed" );
-    return ESP_ERR_INVALID_CRC;
+    *temperature_c = -45.0f + 175.0f * ( (float)raw_temp / 65535.0f );
   }
 
-  return sht3x_compute_values( raw_data, temperature, humidity );
+  if( humidity_rh != NULL )
+  {
+    *humidity_rh = 100.0f * ( (float)raw_hum / 65535.0f );
+  }
+
+  return ESP_OK;
 }
 
-esp_err_t unit_enviii_pressure_get( float *pressure )
+esp_err_t unit_env_iii_read_pressure( float *pressure_pa )
 {
-  float *temp, zero_temp = 0.00;
-  temp = &zero_temp;
-  return _unit_enviii_qmp6988_get( pressure, temp );
+  if( !_initialized )
+  {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if( pressure_pa == NULL )
+  {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  // Read pressure and temperature data (6 bytes total)
+  uint8_t press_reg = _QMP6988_PRESS_MSB_REG;
+  uint8_t press_data[ 6 ]; // 3 bytes pressure + 3 bytes temperature
+
+  esp_err_t ret = _write_read_i2c( _qmp6988_dev, &press_reg, 1,
+                                   press_data, 6 );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "QMP6988 pressure read failed: %s",
+              esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  // Parse raw data (24-bit values) as per datasheet
+  int32_t raw_press = ( (int32_t)press_data[ 0 ] << 16 ) |
+                      ( (int32_t)press_data[ 1 ] << 8 ) | press_data[ 2 ];
+
+  int32_t raw_temp = ( (int32_t)press_data[ 3 ] << 16 ) |
+                     ( (int32_t)press_data[ 4 ] << 8 ) | press_data[ 5 ];
+
+  ESP_LOGD( _TAG, "Raw pressure: %ld, Raw temperature: %ld", (long)raw_press,
+            (long)raw_temp );
+
+  // Compensate temperature first (returns Tr in 256*degC format)
+  float Tr = _qmp6988_compensate_temperature( raw_temp );
+
+  // Then compensate pressure using Tr
+  *pressure_pa = _qmp6988_compensate_pressure( raw_press, Tr );
+
+  // Convert Tr to actual temperature for logging
+  float actual_temp = Tr / 256.0f;
+  ESP_LOGD( _TAG, "Compensated temp: %.2f°C, pressure: %.2f Pa", actual_temp,
+            *pressure_pa );
+
+  return ESP_OK;
 }
 
-esp_err_t unit_enviii_altitude_get( float *altitude ) { return ESP_OK; }
-
-static esp_err_t unit_enviii_qmp6988_validate()
+esp_err_t unit_env_iii_read_data( unit_env_iii_data_t *data )
 {
-  esp_err_t err = ESP_OK;
+  if( !_initialized )
+  {
+    return ESP_ERR_INVALID_STATE;
+  }
 
-  return err;
+  if( data == NULL )
+  {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  // Initialize validity flags
+  data->temp_hum_valid = false;
+  data->pressure_valid = false;
+
+  // Read temperature and humidity
+  esp_err_t ret = unit_env_iii_read_temp_humidity( &data->temperature_c,
+                                                   &data->humidity_rh );
+  if( ret == ESP_OK )
+  {
+    data->temp_hum_valid = true;
+  }
+  else
+  {
+    ESP_LOGW( _TAG, "Temperature/humidity read failed: %s",
+              esp_err_to_name( ret ) );
+  }
+
+  // Read pressure
+  ret = unit_env_iii_read_pressure( &data->pressure_pa );
+  if( ret == ESP_OK )
+  {
+    data->pressure_valid = true;
+  }
+  else
+  {
+    ESP_LOGW( _TAG, "Pressure read failed: %s", esp_err_to_name( ret ) );
+  }
+
+  // Return success if at least one sensor worked
+  if( data->temp_hum_valid || data->pressure_valid )
+  {
+    return ESP_OK;
+  }
+
+  return ESP_FAIL;
 }
 
-static esp_err_t _unit_enviii_qmp6988_get( float *pressure, float *temperature )
+esp_err_t unit_env_iii_set_sht30_heater( bool enable )
 {
+  if( !_initialized )
+  {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  uint16_t heater_cmd =
+      enable ? _SHT30_CMD_HEATER_ENABLE : _SHT30_CMD_HEATER_DISABLE;
+  uint8_t cmd[ 2 ] = { ( heater_cmd >> 8 ) & 0xFF, heater_cmd & 0xFF };
+
+  esp_err_t ret = _write_i2c( _sht30_dev, cmd, 2 );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "SHT30 heater control failed: %s", esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  _config.sht30_heater_enable = enable;
+  return ESP_OK;
+}
+
+esp_err_t unit_env_iii_reset_sht30( void )
+{
+  if( !_initialized )
+  {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  uint8_t reset_cmd[ 2 ] = { ( _SHT30_CMD_SOFT_RESET >> 8 ) & 0xFF,
+                             _SHT30_CMD_SOFT_RESET & 0xFF };
+  esp_err_t ret = _write_i2c( _sht30_dev, reset_cmd, 2 );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "SHT30 reset failed: %s", esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  vTaskDelay( pdMS_TO_TICKS( 10 ) );
+  return ESP_OK;
+}
+
+esp_err_t unit_env_iii_reset_qmp6988( void )
+{
+  if( !_initialized )
+  {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  uint8_t reset_data[ 2 ] = { _QMP6988_RESET_REG, _QMP6988_RESET_CMD };
+  esp_err_t ret = _write_i2c( _qmp6988_dev, reset_data, 2 );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "QMP6988 reset failed: %s", esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  vTaskDelay( pdMS_TO_TICKS( 10 ) );
+  return ESP_OK;
+}
+
+esp_err_t unit_env_iii_check_connection( void )
+{
+  if( !_initialized )
+  {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  // Test SHT30 by reading status
+  uint8_t sht30_cmd[ 2 ] = { ( _SHT30_CMD_READ_STATUS >> 8 ) & 0xFF,
+                             _SHT30_CMD_READ_STATUS & 0xFF };
+  uint8_t sht30_status[ 3 ];
+  esp_err_t ret =
+      _write_read_i2c( _sht30_dev, sht30_cmd, 2, sht30_status, 3 );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "SHT30 connection check failed: %s",
+              esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  // Test QMP6988 by reading chip ID
+  uint8_t qmp6988_reg = _QMP6988_CHIP_ID_REG;
+  uint8_t chip_id;
+  ret = _write_read_i2c( _qmp6988_dev, &qmp6988_reg, 1, &chip_id,
+                         1 );
+  if( ret != ESP_OK )
+  {
+    ESP_LOGE( _TAG, "QMP6988 connection check failed: %s",
+              esp_err_to_name( ret ) );
+    return ret;
+  }
+
+  if( chip_id != _QMP6988_CHIP_ID )
+  {
+    ESP_LOGE( _TAG, "QMP6988 chip ID mismatch during connection check" );
+    return ESP_ERR_NOT_FOUND;
+  }
+
   return ESP_OK;
 }

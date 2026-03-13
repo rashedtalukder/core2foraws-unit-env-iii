@@ -1,106 +1,162 @@
-/*!
- * @brief Library for the ENV III (SHT30+QMP6988) unit by M5Stack used on the
- * Core2 for AWS IoT Kit
- * @copyright Copyright (c) 2023 by Rashed Talukder[https://rashedtalukder.com]
- *
- * @license SPDX-License-Identifier: Apache 2.0
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- * @todo Add support for QMP6988 pressure sensor
- *
- * @Links [ENV III](https://docs.m5stack.com/en/unit/envIII)
- * @version  V0.0.1
- * @date  2023-04-03
- */
+#ifndef UNIT_ENV_III_H
+#define UNIT_ENV_III_H
 
-#ifndef _UNIT_ENV_III_H_
-#define _UNIT_ENV_III_H_
+#include "esp_err.h"
+#include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
-#include "core2foraws.h"
-#include <stdbool.h>
-#include <stdio.h>
+// I2C addresses
+#define UNIT_ENV_III_SHT30_ADDR   0x44
+#define UNIT_ENV_III_QMP6988_ADDR 0x70
+
+  // SHT30 measurement repeatability
+  typedef enum
+  {
+    UNIT_ENV_III_SHT30_REPEATABILITY_HIGH = 0,
+    UNIT_ENV_III_SHT30_REPEATABILITY_MEDIUM,
+    UNIT_ENV_III_SHT30_REPEATABILITY_LOW
+  } unit_env_iii_sht30_repeatability_t;
+
+  // QMP6988 oversampling settings (register values per datasheet)
+  // Value 0 = skip measurement, so valid oversampling starts at 1
+  typedef enum
+  {
+    UNIT_ENV_III_QMP6988_OSR_1 = 1,
+    UNIT_ENV_III_QMP6988_OSR_2 = 2,
+    UNIT_ENV_III_QMP6988_OSR_4 = 3,
+    UNIT_ENV_III_QMP6988_OSR_8 = 4,
+    UNIT_ENV_III_QMP6988_OSR_16 = 5,
+    UNIT_ENV_III_QMP6988_OSR_32 = 6,
+    UNIT_ENV_III_QMP6988_OSR_64 = 7
+  } unit_env_iii_qmp6988_osr_t;
+
+  // QMP6988 IIR filter settings
+  typedef enum
+  {
+    UNIT_ENV_III_QMP6988_FILTER_OFF = 0,
+    UNIT_ENV_III_QMP6988_FILTER_2,
+    UNIT_ENV_III_QMP6988_FILTER_4,
+    UNIT_ENV_III_QMP6988_FILTER_8,
+    UNIT_ENV_III_QMP6988_FILTER_16,
+    UNIT_ENV_III_QMP6988_FILTER_32
+  } unit_env_iii_qmp6988_filter_t;
+
+  // Configuration structure
+  typedef struct
+  {
+    // SHT30 configuration
+    unit_env_iii_sht30_repeatability_t sht30_repeatability;
+    bool sht30_heater_enable;
+
+    // QMP6988 configuration
+    unit_env_iii_qmp6988_osr_t qmp6988_temp_osr;
+    unit_env_iii_qmp6988_osr_t qmp6988_press_osr;
+    unit_env_iii_qmp6988_filter_t qmp6988_filter;
+  } unit_env_iii_config_t;
+
+  // Measurement data structure
+  typedef struct
+  {
+    float temperature_c; // Temperature in Celsius
+    float humidity_rh;   // Relative humidity in %
+    float pressure_pa;   // Pressure in Pascal
+    bool temp_hum_valid; // SHT30 data validity
+    bool pressure_valid; // QMP6988 data validity
+  } unit_env_iii_data_t;
 
   /**
-   * @brief Initialize the temperature/humidity and pressure sensors.
-   * @param duration_to_wait The ticks to wait before taking the first reading
-   * and subsequent readings.
-   * @return
-   * [esp_err_t](https://docs.espressif.com/projects/esp-idf/en/release-v4.3/esp32/api-reference/system/esp_err.html#macros).
-   *  - ESP_OK                : Success
-   *  - ESP_ERR_INVALID_ARG	: Driver parameter error
-   */
-  esp_err_t unit_enviii_init( uint8_t *duration_to_wait );
-
-  /**
-   * @brief Duration to wait between sensor readings.
-   * @param duration The time in RTOS ticks between sensor readings.
-   * @return
-   * [esp_err_t](https://docs.espressif.com/projects/esp-idf/en/release-v4.3/esp32/api-reference/system/esp_err.html#macros).
-   *  - ESP_OK                : Success
-   */
-  esp_err_t unit_enviii_duration_get( uint8_t *duration );
-
-  /**
-   * @brief Duration to wait between sensor readings.
-   * @param duration The time in RTOS ticks between sensor readings.
-   * @return
-   * [esp_err_t](https://docs.espressif.com/projects/esp-idf/en/release-v4.3/esp32/api-reference/system/esp_err.html#macros).
-   *  - ESP_OK                : Success
-   */
-  esp_err_t unit_enviii_duration_get( uint8_t *duration );
-
-  /**
-   * @brief Take a single measurement of the temperature and humidity using the
-   * SHT330 sensor. Must wait at least for duration ticks before retrieving the
-   * data.
-   * @return
-   * [esp_err_t](https://docs.espressif.com/projects/esp-idf/en/release-v4.3/esp32/api-reference/system/esp_err.html#macros).
-   *  - ESP_OK                : Success
-   */
-  esp_err_t unit_enviii_temp_humidity_measure( void );
-
-  /**
-   * @brief Get the stored temp/humidity measurement from the SHT3x sensor.
+   * @brief Initialize Unit ENV-III with default configuration
    *
-   * @param temperature Temperature in degree Celsius
-   * @param humidity    Humidity in percent
-   * @return            `ESP_OK` on success
+   * @return esp_err_t ESP_OK on success
    */
-  esp_err_t unit_enviii_temp_humidity_get( float *temperature,
-                                           float *humidity );
+  esp_err_t unit_env_iii_init( void );
 
   /**
-   * @brief Get the pressure measurement from the QMP6988 sensor.
+   * @brief Initialize Unit ENV-III with custom configuration
    *
-   * @param pressure Pressure in bar
-   * @return            `ESP_OK` on success
+   * @param config Configuration structure
+   * @return esp_err_t ESP_OK on success
    */
-  esp_err_t unit_enviii_pressure_get( float *pressure );
+  esp_err_t
+  unit_env_iii_init_with_config( const unit_env_iii_config_t *config );
 
   /**
-   * @brief Get the calculated altitude by reading the pressure and temperature.
+   * @brief Deinitialize Unit ENV-III
    *
-   * @param altitude The calculated altitude.
-   * @return            `ESP_OK` on success
+   * @return esp_err_t ESP_OK on success
    */
-  esp_err_t unit_enviii_altitude_get( float *altitude );
+  esp_err_t unit_env_iii_deinit( void );
+
+  /**
+   * @brief Read all sensor data
+   *
+   * @param data Pointer to data structure to fill
+   * @return esp_err_t ESP_OK on success
+   */
+  esp_err_t unit_env_iii_read_data( unit_env_iii_data_t *data );
+
+  /**
+   * @brief Read only temperature and humidity from SHT30
+   *
+   * @param temperature_c Pointer to temperature variable (can be NULL)
+   * @param humidity_rh Pointer to humidity variable (can be NULL)
+   * @return esp_err_t ESP_OK on success
+   */
+  esp_err_t unit_env_iii_read_temp_humidity( float *temperature_c,
+                                             float *humidity_rh );
+
+  /**
+   * @brief Read only pressure from QMP6988
+   *
+   * @param pressure_pa Pointer to pressure variable
+   * @return esp_err_t ESP_OK on success
+   */
+  esp_err_t unit_env_iii_read_pressure( float *pressure_pa );
+
+  /**
+   * @brief Get default configuration
+   *
+   * @param config Pointer to configuration structure to fill
+   * @return esp_err_t ESP_OK on success
+   */
+  esp_err_t unit_env_iii_get_default_config( unit_env_iii_config_t *config );
+
+  /**
+   * @brief Set SHT30 heater state
+   *
+   * @param enable true to enable heater, false to disable
+   * @return esp_err_t ESP_OK on success
+   */
+  esp_err_t unit_env_iii_set_sht30_heater( bool enable );
+
+  /**
+   * @brief Reset SHT30 sensor
+   *
+   * @return esp_err_t ESP_OK on success
+   */
+  esp_err_t unit_env_iii_reset_sht30( void );
+
+  /**
+   * @brief Reset QMP6988 sensor
+   *
+   * @return esp_err_t ESP_OK on success
+   */
+  esp_err_t unit_env_iii_reset_qmp6988( void );
+
+  /**
+   * @brief Check if Unit ENV-III is properly connected
+   *
+   * @return esp_err_t ESP_OK if both sensors respond
+   */
+  esp_err_t unit_env_iii_check_connection( void );
 
 #ifdef __cplusplus
 }
 #endif
+
 #endif

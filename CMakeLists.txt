@@ -1,16 +1,15 @@
 cmake_minimum_required( VERSION 3.16.0 )
 
-set( CORE2FORAWS_LIB            "${COMPONENT_DIR}/../Core2-for-AWS-IoT-Kit/lib" )
+set( requires "Core2-for-AWS-IoT-Kit" )
+set( include_dirs "include" )
 
-set( COMPONENT_SRCDIRS          "."
-                                "${CORE2FORAWS_LIB}/common/lib/esp-idf-lib/components/sht3x/"
-                                )
+if( CONFIG_UNIT_ENV_III_USE_PAHUB )
+    list( APPEND requires "core2foraws-unit-pahub" )
+    list( APPEND include_dirs "../core2foraws-unit-pahub/include" )
+endif()
 
-set( COMPONENT_ADD_INCLUDEDIRS  "./include" 
-                                "${CORE2FORAWS_LIB}/common/lib/esp-idf-lib/components/esp_idf_lib_helpers"
-                                "${CORE2FORAWS_LIB}/common/lib/esp-idf-lib/components/sht3x/" 
-                                )
-                                
-set( COMPONENT_REQUIRES         "Core2-for-AWS-IoT-Kit" )
-
-register_component()
+idf_component_register(
+    SRCS "unit_env_iii.c"
+    INCLUDE_DIRS ${include_dirs}
+    REQUIRES ${requires}
+)
