@@ -657,7 +657,7 @@ RH[%RH] = 100 * SRH / 65535
 Equivalent form:
 
 ```text
-RH[%RH] = 100 * SRH / 2^16
+RH[%RH] = 100 * SRH / (2^16 - 1)
 ```
 
 ## Temperature conversion in °C
@@ -671,7 +671,7 @@ T[°C] = -45 + 175 * ST / 65535
 Equivalent form:
 
 ```text
-T[°C] = -45 + 175 * ST / 2^16
+T[°C] = -45 + 175 * ST / (2^16 - 1)
 ```
 
 ## Temperature conversion in °F
@@ -683,7 +683,7 @@ T[°F] = -49 + 315 * ST / 65535
 Equivalent form:
 
 ```text
-T[°F] = -49 + 315 * ST / 2^16
+T[°F] = -49 + 315 * ST / (2^16 - 1)
 ```
 
 ### Conversion constraints
