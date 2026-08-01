@@ -3,7 +3,7 @@
  * Core2 for AWS IoT Kit.
  *
  * The ENV III Unit combines a Sensirion SHT30 temperature/humidity sensor
- * (I2C 0x44) and a Bosch QMP6988 barometric pressure sensor (I2C 0x70). It
+ * (I2C 0x44) and a QST QMP6988 barometric pressure sensor (I2C 0x70). It
  * connects to Port A of the Core2 for AWS IoT Kit, or to a channel of the
  * PA Hub (PCA9548A) I2C multiplexer when CONFIG_UNIT_ENV_III_USE_PAHUB is
  * enabled.
@@ -183,7 +183,8 @@ extern "C"
   /**
    * @brief Deinitialize the ENV III Unit.
    *
-   * Marks the driver uninitialized so subsequent reads are rejected.
+  * Releases both managed I2C device handles and marks the driver
+  * uninitialized so subsequent reads are rejected.
    *
    * @return
    *  - ESP_OK                : Success
@@ -268,7 +269,7 @@ extern "C"
   esp_err_t unit_env_iii_set_sht30_heater( bool enable );
 
   /**
-   * @brief Issue a soft reset to the SHT30.
+  * @brief Reset and restore the configured SHT30 heater state.
    *
    * @return
    *  - ESP_OK                : Success
@@ -278,7 +279,7 @@ extern "C"
   esp_err_t unit_env_iii_reset_sht30( void );
 
   /**
-   * @brief Issue a soft reset to the QMP6988.
+  * @brief Reset and fully reinitialize the QMP6988.
    *
    * @return
    *  - ESP_OK                : Success

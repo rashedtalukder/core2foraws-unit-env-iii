@@ -1,5 +1,9 @@
 # Unit ENV-III Firmware Implementation Specification
 
+## Source Evidence and Precedence
+
+Verified on 2026-08-01 against the official [M5Stack Unit ENV-III page](https://docs.m5stack.com/en/unit/envIII), its board schematic, and the checked-in manufacturer PDFs. `SHT30.pdf` is Sensirion SHT3x-DIS version 6 (SHA-256 `01bf97ea9113fef8ad3b7b368689170440015851c2f1a23becc7a3a90855ad64`); `QMP6988.pdf` is QST document 13-52-13 revision C (SHA-256 `a92691da0ea0b01299f7b0f39cc0ed576573e101bace609cb287ddeff886a87d`). Board wiring and fitted-part claims come from M5Stack; chip protocol and math come from the PDFs. See `schema.yml`.
+
 This document is a self-contained firmware implementation reference for the **Unit ENV-III (SKU: U001-C)** module. It is intended to enable automatic generation of firmware drivers, HAL integrations, BSPs, communication handlers, and test code **without requiring the original source files**.
 
 The Unit ENV-III is a **composite I2C environmental sensing module** containing:
@@ -644,9 +648,9 @@ Byte order is big-endian per 16-bit word: **MSB first, then LSB**.
 
 Conversion formulas:
 
-* **RH[%] = 100 × SRH / 2^16**
-* **T[°C] = -45 + 175 × ST / 2^16**
-* **T[°F] = -49 + 315 × ST / 2^16**
+* **RH[%] = 100 × SRH / (2^16 - 1)**
+* **T[°C] = -45 + 175 × ST / (2^16 - 1)**
+* **T[°F] = -49 + 315 × ST / (2^16 - 1)**
 
 Where:
 

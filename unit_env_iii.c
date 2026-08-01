@@ -89,6 +89,33 @@ static esp_err_t _qmp6988_read_calibration( void );
 static float _qmp6988_compensate_temperature( int32_t raw_temp );
 static float _qmp6988_compensate_pressure( int32_t raw_press, float comp_temp );
 
+static void _release_i2c_devices( void )
+{
+  if( _qmp6988_dev != NULL )
+  {
+    core2foraws_expports_i2c_device_remove( _qmp6988_dev );
+    _qmp6988_dev = NULL;
+  }
+  if( _sht30_dev != NULL )
+  {
+    core2foraws_expports_i2c_device_remove( _sht30_dev );
+    _sht30_dev = NULL;
+  }
+}
+
+static bool _config_is_valid( const unit_env_iii_config_t *config )
+{
+  return config->sht30_repeatability >=
+             UNIT_ENV_III_SHT30_REPEATABILITY_HIGH &&
+         config->sht30_repeatability <=
+             UNIT_ENV_III_SHT30_REPEATABILITY_LOW &&
+         config->qmp6988_temp_osr >= UNIT_ENV_III_QMP6988_OSR_1 &&
+         config->qmp6988_temp_osr <= UNIT_ENV_III_QMP6988_OSR_64 &&
+         config->qmp6988_press_osr >= UNIT_ENV_III_QMP6988_OSR_1 &&
+         config->qmp6988_press_osr <= UNIT_ENV_III_QMP6988_OSR_64 &&
+         config->qmp6988_filter <= UNIT_ENV_III_QMP6988_FILTER_32;
+}
+
 // I2C communication functions
 static esp_err_t _write_i2c( i2c_master_dev_handle_t dev, const uint8_t *data, size_t len )
 {
@@ -129,7 +156,6 @@ static esp_err_t _read_i2c( i2c_master_dev_handle_t dev, uint8_t *data, size_t l
 #else
   return core2foraws_expports_i2c_read( dev, CORE2FORAWS_I2C_NO_REG, data, len );
 #endif
-  return ESP_FAIL;  /* unreachable — silences -Wreturn-type */
 }
 
 static esp_err_t _write_read_i2c( i2c_master_dev_handle_t dev, const uint8_t *write_data,
@@ -277,6 +303,7 @@ static esp_err_t _qmp6988_init( void )
   // Wait for OTP data to be ready (datasheet: otp_update must be 0)
   uint8_t stat_reg = _QMP6988_DEVICE_STAT_REG;
   uint8_t stat_val = 0;
+  bool otp_ready = false;
   for( int i = 0; i < 10; i++ )
   {
     ret = _write_read_i2c( _qmp6988_dev, &stat_reg, 1, &stat_val,
@@ -289,9 +316,15 @@ static esp_err_t _qmp6988_init( void )
     }
     if( !( stat_val & 0x01 ) )
     {
+      otp_ready = true;
       break; // OTP update complete
     }
     vTaskDelay( pdMS_TO_TICKS( 5 ) );
+  }
+  if( !otp_ready )
+  {
+    ESP_LOGE( _TAG, "QMP6988 OTP data did not become ready" );
+    return ESP_ERR_TIMEOUT;
   }
 
   // Read calibration data
@@ -498,7 +531,7 @@ esp_err_t unit_env_iii_init( void )
 
 esp_err_t unit_env_iii_init_with_config( const unit_env_iii_config_t *config )
 {
-  if( config == NULL )
+  if( config == NULL || !_config_is_valid( config ) )
   {
     return ESP_ERR_INVALID_ARG;
   }
@@ -540,6 +573,7 @@ esp_err_t unit_env_iii_init_with_config( const unit_env_iii_config_t *config )
   if( ret != ESP_OK )
   {
     ESP_LOGE( _TAG, "Failed to add QMP6988 I2C device: %s", esp_err_to_name( ret ) );
+    _release_i2c_devices();
     return ret;
   }
 
@@ -547,6 +581,7 @@ esp_err_t unit_env_iii_init_with_config( const unit_env_iii_config_t *config )
   ret = _sht30_init();
   if( ret != ESP_OK )
   {
+    _release_i2c_devices();
     return ret;
   }
 
@@ -554,6 +589,7 @@ esp_err_t unit_env_iii_init_with_config( const unit_env_iii_config_t *config )
   ret = _qmp6988_init();
   if( ret != ESP_OK )
   {
+    _release_i2c_devices();
     return ret;
   }
 
@@ -570,6 +606,7 @@ esp_err_t unit_env_iii_deinit( void )
   }
 
   _initialized = false;
+  _release_i2c_devices();
   ESP_LOGI( _TAG, "Unit ENV-III deinitialized" );
   return ESP_OK;
 }
@@ -773,17 +810,7 @@ esp_err_t unit_env_iii_reset_sht30( void )
     return ESP_ERR_INVALID_STATE;
   }
 
-  uint8_t reset_cmd[ 2 ] = { ( _SHT30_CMD_SOFT_RESET >> 8 ) & 0xFF,
-                             _SHT30_CMD_SOFT_RESET & 0xFF };
-  esp_err_t ret = _write_i2c( _sht30_dev, reset_cmd, 2 );
-  if( ret != ESP_OK )
-  {
-    ESP_LOGE( _TAG, "SHT30 reset failed: %s", esp_err_to_name( ret ) );
-    return ret;
-  }
-
-  vTaskDelay( pdMS_TO_TICKS( 10 ) );
-  return ESP_OK;
+  return _sht30_init();
 }
 
 esp_err_t unit_env_iii_reset_qmp6988( void )
@@ -793,16 +820,7 @@ esp_err_t unit_env_iii_reset_qmp6988( void )
     return ESP_ERR_INVALID_STATE;
   }
 
-  uint8_t reset_data[ 2 ] = { _QMP6988_RESET_REG, _QMP6988_RESET_CMD };
-  esp_err_t ret = _write_i2c( _qmp6988_dev, reset_data, 2 );
-  if( ret != ESP_OK )
-  {
-    ESP_LOGE( _TAG, "QMP6988 reset failed: %s", esp_err_to_name( ret ) );
-    return ret;
-  }
-
-  vTaskDelay( pdMS_TO_TICKS( 10 ) );
-  return ESP_OK;
+  return _qmp6988_init();
 }
 
 esp_err_t unit_env_iii_check_connection( void )
@@ -823,6 +841,11 @@ esp_err_t unit_env_iii_check_connection( void )
     ESP_LOGE( _TAG, "SHT30 connection check failed: %s",
               esp_err_to_name( ret ) );
     return ret;
+  }
+  if( _crc8( sht30_status, 2 ) != sht30_status[ 2 ] )
+  {
+    ESP_LOGE( _TAG, "SHT30 status CRC check failed" );
+    return ESP_ERR_INVALID_CRC;
   }
 
   // Test QMP6988 by reading chip ID

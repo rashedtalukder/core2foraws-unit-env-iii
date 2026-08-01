@@ -1,5 +1,9 @@
 # SHT30 (SHT3x-DIS Family) — Complete I²C Driver and Register/Command Reference
 
+## Source Evidence
+
+Converted and verified from checked-in `SHT30.pdf`, Sensirion SHT3x-DIS February 2019 version 6, SHA-256 `01bf97ea9113fef8ad3b7b368689170440015851c2f1a23becc7a3a90855ad64`. The official [Sensirion SHT30 product page](https://sensirion.com/products/catalog/SHT30-DIS-B) provides current manufacturer context; the [M5Stack ENV-III page](https://docs.m5stack.com/en/unit/envIII) controls module wiring and the fitted `0x44` address. See `schema.yml`.
+
 ## Purpose
 
 This document is a **self-contained implementation reference** for building a complete **I²C driver** for the **Sensirion SHT30-DIS** humidity and temperature sensor.

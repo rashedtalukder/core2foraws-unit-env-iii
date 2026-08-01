@@ -1,0 +1,30 @@
+schema_version: "1.0"
+device:
+  name: "M5Stack Unit ENV-III"
+  sku: "U001-C"
+  scope: "Board-level SHT30 and QMP6988 environmental sensor unit"
+
+source_evidence:
+  verified_on: "2026-08-01"
+  official_product_page: "https://docs.m5stack.com/en/unit/envIII"
+  board_schematic: "https://static-cdn.m5stack.com/resource/docs/products/unit/envIII/envIII_sch_01.webp"
+  chip_sources:
+    sht30:
+      file: "SHT30.pdf"
+      revision: "Sensirion SHT3x-DIS, February 2019, version 6"
+      sha256: "01bf97ea9113fef8ad3b7b368689170440015851c2f1a23becc7a3a90855ad64"
+      official_url: "https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/datasheet/unit/SHT3x_Datasheet_digital.pdf"
+    qmp6988:
+      file: "QMP6988.pdf"
+      revision: "QST document 13-52-13, revision C"
+      sha256: "a92691da0ea0b01299f7b0f39cc0ed576573e101bace609cb287ddeff886a87d"
+      official_url: "https://m5stack.oss-cn-shenzhen.aliyuncs.com/resource/docs/datasheet/unit/enviii/QMP6988%20Datasheet.pdf"
+  precedence:
+    - "Use the board schematic and product page for fitted sensors, addresses, power, and connector wiring."
+    - "Use the checked-in manufacturer PDFs for chip commands, registers, timing, CRC, and compensation math."
+
+interface:
+  type: "I2C"
+  devices:
+    - { name: "SHT30", address_7bit: 0x44 }
+    - { name: "QMP6988", address_7bit: 0x70 }
